@@ -1,0 +1,34 @@
+{
+  "page": {
+    "dpi": 180,
+    "margin_top_mm": 54,
+    "margin_bottom_mm": 20,
+    "margin_left_mm": 22,
+    "margin_right_mm": 20
+  },
+  "background": {
+    "image": "../background/扫描_f972498d011548b383f908d9b1a7fc0e.pdf",
+    "auto_discover": true,
+    "style": "lined",
+    "paper_color": "#fffdf4",
+    "line_color": "#d7e4ef",
+    "margin_line_color": "#edb2aa",
+    "line_gap_mm": 8,
+    "draw_margin_line": true
+  },
+  "handwriting": {
+    "ink_color": "#17233b",
+    "body_font_pt": 13.5,
+    "math_font_pt": 18,
+    "line_spacing": 1.55,
+    "word_spacing_px": -1,
+    "perturb_theta_sigma": 0.045,
+    "seed": 42,
+    "prefer_handright": true
+  },
+  "layout": {
+    "number_sections": true,
+    "image_placeholder_height_mm": 65,
+    "image_placeholder_border": true
+  }
+}

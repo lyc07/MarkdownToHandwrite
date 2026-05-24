@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handwritten-report"
+version = "0.1.0"
+description = "Generate handwritten lab-report PDFs from Markdown."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "handright>=8.2.0",
+  "markdown-it-py>=4.0.0",
+  "mdit-py-plugins>=0.5.0",
+  "pillow>=8.3.2,<11",
+  "PyMuPDF>=1.24.0",
+  "reportlab>=4.0.0",
+]
+
+[project.scripts]
+handwritten-report = "handwritten_report.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
