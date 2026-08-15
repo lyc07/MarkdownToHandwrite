@@ -1,0 +1,57 @@
+{
+  "page": {
+    "dpi": 300,
+    "margin_top_mm": 54,
+    "margin_bottom_mm": 20,
+    "margin_left_mm": 22,
+    "margin_right_mm": 20
+  },
+  "background": {
+    "image": "../background/扫描_f972498d011548b383f908d9b1a7fc0e.pdf",
+    "auto_discover": true,
+    "style": "lined",
+    "paper_color": "#fffdf4",
+    "line_color": "#d7e4ef",
+    "margin_line_color": "#edb2aa",
+    "line_gap_mm": 8,
+    "draw_margin_line": true
+  },
+  "handwriting": {
+    "ink_color": "#000000",
+    "body_font_pt": 16,
+    "math_font_pt": 20,
+    "math_rule_tilt_ratio": 0.048,
+    "math_rule_wobble_ratio": 0.012,
+    "math_rule_jitter_ratio": 0.050,
+    "line_spacing": 1.65,
+    "word_spacing_px": -1,
+    "perturb_theta_sigma": 0.008,
+    "math_perturb_y_sigma_ratio": 0.015,
+    "sdt_trajectory_enabled": true,
+    "sdt_trajectory_path": null,
+    "sdt_stroke_width": 14.0,
+    "sdt_coordinate_jitter": 0.6,
+    "sdt_jitter_correlation": 10.0,
+    "sdt_width_jitter": 0.10,
+    "sdt_taper": 0.22,
+    "sdt_supersample": 3,
+    "second_layer_enabled": true,
+    "elastic_strength_ratio": 0.022,
+    "elastic_smoothness_ratio": 0.55,
+    "baseline_wave_amplitude_ratio": 0.018,
+    "baseline_wave_length_em": 8.0,
+    "stroke_weight_base_scale": 1.0,
+    "stroke_weight_variation_sigma_ratio": 0.0035,
+    "ink_density_jitter": 0.08,
+    "dry_brush_probability": 0.08,
+    "dry_brush_min_opacity": 0.72,
+    "seed": 42,
+    "prefer_handright": true
+  },
+  "layout": {
+    "number_sections": true,
+    "show_page_numbers": true,
+    "image_placeholder_height_mm": 65,
+    "image_placeholder_border": true
+  }
+}

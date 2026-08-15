@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="将 Markdown 排版成自然、可复现的手写实验报告。" />
+    <title>MarkdownToHandwrite</title>
+    <link rel="stylesheet" href="/styles.css?v=2" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <button class="icon-button mobile-only" id="toggle-editor" type="button" aria-label="打开文稿面板">文</button>
+          <div class="brand-mark" aria-hidden="true"><span>M</span></div>
+          <div>
+            <div class="brand-name">MarkdownToHandwrite</div>
+            <div class="brand-tagline">Markdown to Handwriting Studio</div>
+          </div>
+        </div>
+
+        <div class="topbar-center" aria-label="服务状态">
+          <span class="status-dot"></span>
+          <span id="service-status">本地渲染器已连接</span>
+        </div>
+
+        <div class="topbar-actions">
+          <label class="quiet-button file-button" title="导入配置 JSON">
+            <input id="config-import" type="file" accept="application/json,.json" hidden />
+            导入配置
+          </label>
+          <button class="quiet-button" id="config-export" type="button">导出配置</button>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换明暗主题">◐</button>
+          <button class="primary-button compact" id="render-top" type="button">生成手稿</button>
+          <button class="icon-button mobile-only" id="toggle-settings" type="button" aria-label="打开参数面板">调</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="editor-panel side-panel" id="editor-panel" aria-label="Markdown 文稿">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">MANUSCRIPT</span>
+              <h1>文稿</h1>
+            </div>
+            <button class="panel-close mobile-only" data-close-panel type="button" aria-label="关闭文稿面板">×</button>
+          </div>
+
+          <div class="source-actions">
+            <label class="select-label" for="example-select">示例文稿</label>
+            <div class="inline-actions">
+              <select id="example-select" aria-label="选择示例文稿"></select>
+              <label class="square-action" title="导入 Markdown">
+                <input id="markdown-import" type="file" accept="text/markdown,.md,.txt" hidden />
+                ＋
+              </label>
+            </div>
+          </div>
+
+          <div class="editor-wrap">
+            <div class="editor-ruler" aria-hidden="true"><span>MD</span><span>UTF-8</span></div>
+            <textarea id="markdown-editor" spellcheck="false" aria-label="Markdown 内容" placeholder="# 在这里输入实验报告…"></textarea>
+          </div>
+
+          <div class="document-stats" aria-live="polite">
+            <span><strong id="char-count">0</strong> 字符</span>
+            <span><strong id="line-count">0</strong> 行</span>
+            <span id="save-state">配置已同步</span>
+          </div>
+
+          <div class="editor-note">
+            <span class="note-mark">i</span>
+            <p>支持标题、段落、列表、表格与 LaTeX 公式。按 <kbd>Ctrl</kbd> + <kbd>Enter</kbd> 可直接生成。</p>
+          </div>
+        </section>
+
+        <section class="preview-stage" aria-label="报告预览">
+          <div class="preview-toolbar">
+            <div class="toolbar-group">
+              <button class="tool-button" id="prev-page" type="button" disabled aria-label="上一页">‹</button>
+              <div class="page-indicator"><span id="current-page">0</span><i>/</i><span id="page-count">0</span></div>
+              <button class="tool-button" id="next-page" type="button" disabled aria-label="下一页">›</button>
+            </div>
+            <div class="preview-title">
+              <span>纸面预览</span>
+              <small id="preview-meta">A4 · 尚未生成</small>
+            </div>
+            <div class="toolbar-group">
+              <button class="tool-button" id="zoom-out" type="button" aria-label="缩小">−</button>
+              <button class="zoom-value" id="zoom-fit" type="button" title="适合窗口"><span id="zoom-label">72%</span></button>
+              <button class="tool-button" id="zoom-in" type="button" aria-label="放大">＋</button>
+              <a class="download-button disabled" id="download-pdf" aria-disabled="true">下载 PDF</a>
+            </div>
+          </div>
+
+          <div class="canvas-viewport" id="canvas-viewport">
+            <div class="canvas-grid" aria-hidden="true"></div>
+            <div class="paper-shell" id="paper-shell">
+              <div class="empty-paper" id="empty-paper">
+                <div class="paper-corner">01</div>
+                <div class="empty-paper-copy">
+                  <span class="eyebrow">READY TO WRITE</span>
+                  <h2>让文字落到纸面上</h2>
+                  <p>编辑左侧 Markdown，调整右侧笔迹参数，然后生成第一份预览。</p>
+                  <button class="primary-button" id="render-empty" type="button">生成当前文稿</button>
+                </div>
+                <div class="paper-lines" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+              </div>
+              <img id="preview-image" alt="生成的手写报告页面" hidden />
+            </div>
+
+            <div class="render-overlay" id="render-overlay" hidden>
+              <div class="ink-loader" aria-hidden="true"><span></span><span></span><span></span></div>
+              <strong>正在生成手稿</strong>
+              <p id="render-step">排版、书写并处理墨迹…</p>
+              <time id="render-time">00:00</time>
+            </div>
+          </div>
+        </section>
+
+        <aside class="settings-panel side-panel" id="settings-panel" aria-label="全部配置参数">
+          <div class="settings-head">
+            <div>
+              <span class="eyebrow">PARAMETERS</span>
+              <h2>参数侧栏</h2>
+              <p><span id="field-count">0</span> 项配置 · 分层控制</p>
+            </div>
+            <button class="panel-close mobile-only" data-close-panel type="button" aria-label="关闭参数面板">×</button>
+          </div>
+
+          <div class="style-presets" aria-label="笔迹风格预设">
+            <button type="button" data-preset="formal"><span>工整</span></button>
+            <button type="button" data-preset="natural" class="active"><span>自然</span></button>
+            <button type="button" data-preset="casual"><span>随性</span></button>
+          </div>
+
+          <div class="settings-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="config-search" type="search" placeholder="搜索参数，如“边距”或“墨水”" aria-label="搜索配置参数" />
+            <button id="reset-config" type="button" title="恢复全部默认参数">重置</button>
+          </div>
+
+          <div class="config-sections" id="config-sections"></div>
+
+          <div class="render-dock">
+            <div class="render-summary">
+              <span id="render-summary-title">自然笔迹</span>
+              <small id="render-summary-meta">180 DPI · 第二层已启用</small>
+            </div>
+            <button class="primary-button" id="render-main" type="button"><span>生成手稿</span><kbd>⌘ ↵</kbd></button>
+          </div>
+        </aside>
+      </main>
+      <div class="panel-scrim" id="panel-scrim" hidden></div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+      <span class="toast-mark">✓</span>
+      <div><strong id="toast-title">完成</strong><p id="toast-message"></p></div>
+    </div>
+
+    <script src="/app.js?v=1" defer></script>
+  </body>
+</html>

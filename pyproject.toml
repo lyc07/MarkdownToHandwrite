@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MarkdownToHandwrite"
+version = "0.1.0"
+description = "Convert Markdown documents into handwritten-style PDFs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "handright>=8.2.0",
+  "markdown-it-py>=4.0.0",
+  "mdit-py-plugins>=0.5.0",
+  "numpy>=1.26,<3",
+  "pillow>=8.3.2,<11",
+  "PyMuPDF>=1.24.0",
+  "reportlab>=4.0.0",
+]
+
+[project.scripts]
+markdown-to-handwrite = "markdown_to_handwrite.cli:main"
+markdown-to-handwrite-web = "markdown_to_handwrite.web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+markdown_to_handwrite = ["webui/*.html", "webui/*.css", "webui/*.js", "assets/*.zip"]
