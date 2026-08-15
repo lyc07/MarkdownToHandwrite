@@ -1,6 +1,6 @@
-# Markdown 手写实验报告生成器
+# Markdown手写文档生成器
 
-这个项目把一份 Markdown 实验报告排成接近 LaTeX 风格的 A4 PDF，并把正文、公式和表格渲染成手写效果。Markdown 中的图片不会被绘制，程序会为图片保留空白占位区域，方便后续手绘或粘贴。
+这个项目把一份 Markdown 文档排版成latex风格，并把正文、公式和表格渲染成手写效果。Markdown 中的图片不会被绘制，程序会为图片保留空白占位区域，方便后续手绘或粘贴。
 
 ## 功能
 
@@ -25,8 +25,7 @@
 python -m pip install -r requirements.txt
 ```
 
-本工作区已经尝试并成功安装了依赖到 `.codex_deps`，直接用下面的命令也可以运行：
-
+从源码运行：
 ```powershell
 $env:PYTHONPATH='src'
 python -m handwritten_report examples/report.md -o output/pdf/sample_report.pdf -c examples/config.json
@@ -89,8 +88,8 @@ python -m handwritten_report input.md -o report.pdf -c config.json
 python -m handwritten_report input.md -o report.pdf --background grid --paper-color "#fffdf0" --ink-color "#24345c" --seed 42
 ```
 
-指定扫描报告纸背景：
+指定背景：
 
 ```powershell
-python -m handwritten_report input.md -o report.pdf --background-image "background/扫描_f972498d011548b383f908d9b1a7fc0e.pdf"
+python -m handwritten_report input.md -o report.pdf --background-image "background/background.pdf"
 ```
