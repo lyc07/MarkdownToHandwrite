@@ -4,14 +4,23 @@
 
 项目内置WebUI。由SDT生成中文笔迹轨迹，两层随机扰动增加真实性。支持LaTeX公式布局，适合实验报告、课程作业等需要手写观感的文档。
 
+A Python tool that converts Markdown documents into realistic handwritten notes.
+
+Generate handwritten-style PDF documents from Markdown with:
+- Chinese handwriting support
+- LaTeX mathematical equations
+- Markdown formatting
+
+<img width="830" height="415" alt="sample" src="https://github.com/user-attachments/assets/1f2b255f-62b9-4db9-a72b-d607a8839532" />
 
 ## 特性
 
-- **SDT 轨迹渲染**：运行时直接读取内置的笔迹模型，无需 GPU、PyTorch 或 SDT 训练仓库。
+- **丰富的 Markdown 环境**：支持标题、段落、列表、代码块、表格，以及标题、表格和列表中的行内公式。
 - **统一笔画风格**：中文轨迹、字体中心线符号、公式线和表格线使用同一个基础笔宽。
 - **两层自然扰动**：支持字符旋转与偏移、平滑路径扰动、弹性形变、基线起伏、笔压变化、起收笔、墨色波动和飞白。
 - **二维数学排版**：支持行内及行间公式，支持分式、根式、上下标等格式。
-- **丰富的 Markdown 环境**：支持标题、段落、列表、代码块、表格，以及标题、表格和列表中的行内公式。
+- **SDT 轨迹渲染**：默认直接读取笔迹模型渲染。含内置模型，也支持自定义模型。
+- **个性化字体**：支持自定义中英文字体。
 - **纸张与分页**：支持纯色、横线、方格、点阵以及图片/PDF 背景，可选择标题编号和底部页码。
 - **可复现生成**：相同配置、文稿和随机种子会得到相同结果。
 - **本地 WebUI**：提供 Markdown 编辑器、多页预览、明暗主题、三档笔迹预设、全部配置参数以及 JSON 导入/导出。
