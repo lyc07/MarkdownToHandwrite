@@ -7,8 +7,8 @@
     "margin_right_mm": 20
   },
   "background": {
-    "image": "../background/扫描_f972498d011548b383f908d9b1a7fc0e.pdf",
-    "auto_discover": true,
+    "image": null,
+    "auto_discover": false,
     "style": "lined",
     "paper_color": "#fffdf4",
     "line_color": "#d7e4ef",
@@ -25,6 +25,7 @@
     "math_rule_jitter_ratio": 0.050,
     "line_spacing": 1.65,
     "word_spacing_px": -1,
+    "advance_jitter_sigma_ratio": 0.01,
     "perturb_theta_sigma": 0.008,
     "math_perturb_y_sigma_ratio": 0.015,
     "sdt_trajectory_enabled": true,
@@ -50,6 +51,8 @@
   },
   "layout": {
     "number_sections": true,
+    "number_figures": false,
+    "justify_paragraphs": true,
     "show_page_numbers": true,
     "image_placeholder_height_mm": 65,
     "image_placeholder_border": true

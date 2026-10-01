@@ -98,7 +98,7 @@ python -m markdown_to_handwrite.web
 将示例 Markdown 生成 PDF：
 
 ```bash
-markdown-to-handwrite examples/report0.md \
+markdown-to-handwrite examples/sample.md \
   --output output/pdf/report.pdf \
   --config examples/config.json
 ```
@@ -106,7 +106,7 @@ markdown-to-handwrite examples/report0.md \
 Windows PowerShell 也可以写成一行：
 
 ```powershell
-markdown-to-handwrite examples/report0.md -o output/pdf/report.pdf -c examples/config.json
+markdown-to-handwrite examples/sample.md -o output/pdf/report.pdf -c examples/config.json
 ```
 
 常用覆盖参数：
@@ -135,6 +135,18 @@ markdown-to-handwrite --help
 markdown-to-handwrite-web --help
 ```
 
+### 字符间距与右侧对齐
+
+WebUI 的“字体、字号与字距”提供“字符间距”和“字距随机扰动 σ”；“文档布局”提供“拉伸至右侧对齐”开关。JSON 配置保留原有字段 `handwriting.word_spacing_px`：它给非空格字符的前进量增减输出像素，负值收紧、正值放宽，范围为 -12～24 px，支持 0.5 px 等小数，不改变空格本身的宽度。`handwriting.advance_jitter_sigma_ratio` 控制字距的随机变化，实际标准差为当前字号乘以该比例，默认 0.01，范围 0～0.1，设为 0 可关闭；它与字符水平偏移是独立设置。
+
+`layout.justify_paragraphs` 默认为 `true`。正文因行宽自然折行时，足够满的非末行会整体向右拉伸，最多增加 18% 宽度，字符和间距一起变化；含行内公式或 `<br>` 的段落采用相同规则。显式换行结束的行、段尾和短行不拉伸。设为 `false` 后，各行保留自然宽度。
+
+```bash
+markdown-to-handwrite input.md --char-spacing 0.5 --spacing-jitter 0 --no-justify
+```
+
+`--justify` 可开启拉伸；未提供这些参数时，保留 JSON 配置中的相应设置。字符间距作用于正文、标题、列表、表格及公式字符，公式结构本身的间隔仍由数学排版控制。
+
 ## Markdown 示例
 
 ```markdown
@@ -160,7 +172,46 @@ $$
 
 行内公式支持 `$...$` 和 `\(...\)`，行间公式支持 `$$...$$`。行内公式可出现在普通段落、标题、列表和表格单元格中。
 
+例如，直接在 Markdown 文件或网页编辑器中输入下面的内容，每个括号前使用一个反斜杠：
+
+```markdown
+速度满足 \(v=\frac{s}{t}\)，温度为 \(T_2\)。
+```
+
+括号形式可与 `$...$` 混用，也支持 `<br>` 和 `<noindent>`；代码中的写法按字面保留。可载入示例见 [examples/latex_inline.md](examples/latex_inline.md)。
+
+### 表格列宽
+
+表格自动铺满正文宽度。列宽计算包含表头、所有数据行和左右内边距；公式使用实际二维排版宽度，`<br>` 则按最长一行计算。先为各列分配基础空间，再优先满足单词、字符和完整公式的宽度需求，最后将剩余空间分给长内容；较短的字段会更紧凑，长说明可以换行。
+
+列数过多时，各列共同缩减基础宽度；窄列会自动减少水平内边距。取整后的总宽度严格等于正文宽度，不再由最后一列承担全部差额。可载入 [examples/table_widths.md](examples/table_widths.md) 查看长说明、公式和多列表格的效果。
+
+### HTML 排版标签
+
+- `<br>` 在当前段落内换行，不重新缩进；连续 `<br><br>` 会保留一个空行。也可用于标题、列表和表格单元格。
+- `<p>` 开始新段，`</p>` 结束段落，采用正常的首行缩进和段间距。既支持 `<p>第一段</p><p>第二段</p>`，也支持 `第一段<p>第二段`。
+- `<noindent>` 取消所在正文段落的首行缩进，下一段恢复原设置。可放在段首，也可独立一行放在正文段落前；支持 `<p><noindent>正文</p>` 和 `<noindent><p>正文</p>`。独立标签后若紧接标题、列表、公式、图片或换页等其他内容，不会影响再后面的段落。
+- `<newpage>` 让后续内容从下一页开始，建议独立成行。页首、文末或连续的换页标签不会额外产生空白页。
+
+```markdown
+第一行<br>第二行
+<p>这是新的一段，支持 $E=mc^2$ 等行内公式。</p>
+
+<noindent>这一段不缩进。<br>换行后仍属于同一段。
+
+这一段恢复正常首行缩进。
+
+<newpage>
+
+## 下一页
+这里从新页开始。
+```
+
+标签不区分大小写，也接受 `<br/>`、`<p/>`、`<newpage/>`、`<noindent/>`；属性不影响排版。`<br>` 旁边的源码换行不会再多换一行。`<p>`、`<newpage>` 和 `<noindent>` 用于正文及块之间，在标题、列表项、表格单元格中保留为字面文字；列表结束后的换页或取消缩进标签应独立成行且不缩进。Markdown 代码、公式、反斜杠转义及 `&lt;...&gt;` 中的标签不会触发排版。完整示例见 [examples/html_layout.md](examples/html_layout.md) 和 [examples/noindent.md](examples/noindent.md)。
+
 Markdown 图片、`<img>`、`<video>` 和 `<iframe>` 只产生指定高度的占位区域，不会读取或绘制外部内容，方便后续手绘、粘贴或单独排版。
+
+WebUI“文档布局”中的“自动编号插图”默认关闭，图片下方只显示标题。开启后按文档中的图片顺序从 1 连续编号，例如 `![实验装置](figures/device.png)` 的标题显示为“图1：实验装置”。JSON 配置可设置 `layout.number_figures` 为 `true` 开启，或设为 `false` 关闭；命令行通过 `-c` 加载该配置。可在 WebUI 载入 [examples/figure_captions.md](examples/figure_captions.md) 比较两种效果。
 
 ## 公式支持范围
 
@@ -171,6 +222,31 @@ Markdown 图片、`<img>`、`<video>` 和 `<iframe>` 只产生指定高度的占
 - `\sum`、`\prod`、`\int`、`\iint`、`\iiint`、`\lim` 及 `\limits` / `\nolimits`；
 - `\bar`、`\overline`、`\underline`、`\vec`、`\hat`、`\tilde`、`\dot`、`\ddot`；
 - `matrix`、`pmatrix`、`bmatrix`、`vmatrix`、`cases` 等网格环境；
+- 行间公式编号 `\tag{1}`（显示 `(1)`）和 `\tag*{A}`（显示 `A`）。
+
+编号使用与公式一致的手写字体，公式主体居中，编号在公式区域右侧对齐；空间不足时，编号移到公式下方右侧，避免重叠。标签内可以使用嵌套分组及已支持的命令，例如 `\tag{\text{A.1}}`。
+
+```latex
+$$
+E=mc^2 \tag{1}
+$$
+
+$$
+\begin{align}
+a &= b+c \tag{2a} \\
+d &= e+f \tag*{B}
+\end{align}
+$$
+
+$$
+\begin{aligned}
+x &= a+b \\
+y &= c+d
+\end{aligned}\tag{3}
+$$
+```
+
+`align`、`aligned`、`equation`、`gathered`（含星号形式）环境内的编号跟随对应行；环境外的编号标记整组公式。每行或每组只能设置一个编号，整组编号不能与组内编号同时使用。`\tag` 仅用于行间公式，必须带花括号参数；不提供自动编号及 `\label` / `\ref` 引用。可运行示例见 [examples/equation_tags.md](examples/equation_tags.md)。
 
 不支持的命令或错误的括号不会静默变成普通文字：页面会保留空白位置，控制台会输出 `[latex-render-error]` 和对应公式源码。
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import math
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,10 +25,10 @@ from .markdown_parser import (
     ImageBlock,
     InlinePart,
     ListBlock,
+    PageBreakBlock,
     ParagraphBlock,
     RuleBlock,
     TableBlock,
-    parts_to_text,
 )
 from .typography import westernize_punctuation
 
@@ -40,6 +42,7 @@ class _RichLine:
     width: int
     height: int
     baseline: int
+    wrapped: bool = False
 
 
 class ReportRenderer:
@@ -71,18 +74,23 @@ class ReportRenderer:
         self.draw: ImageDraw.ImageDraw
         self.y = self.margin_top
         self.section_counters = [0, 0, 0, 0, 0, 0]
+        self.figure_counter = 0
         self._new_page()
 
     def render(self, blocks: list[Block]) -> list[Image.Image]:
+        page_break_pending = False
         for block in blocks:
+            if isinstance(block, PageBreakBlock):
+                page_break_pending = True
+                continue
+            if page_break_pending:
+                if self.y > self.margin_top:
+                    self._new_page()
+                page_break_pending = False
             if isinstance(block, HeadingBlock):
                 self._draw_heading(block)
             elif isinstance(block, ParagraphBlock):
-                text = parts_to_text(block.parts)
-                if any(part.kind == "math" for part in block.parts):
-                    self._draw_rich_paragraph(block.parts)
-                else:
-                    self._draw_paragraph(text)
+                self._draw_rich_paragraph(block.parts, no_indent=block.no_indent)
             elif isinstance(block, FormulaBlock):
                 self._draw_formula(block.text)
             elif isinstance(block, TableBlock):
@@ -244,32 +252,18 @@ class ReportRenderer:
     def _draw_paragraph(self, text: str) -> None:
         if not text:
             return
-        size = pt_to_px(self.config.handwriting.body_font_pt, self.dpi)
-        line_h = round(size * self.config.handwriting.line_spacing)
-        gap = mm_to_px(self.config.layout.paragraph_gap_mm, self.dpi)
-        indent = round(size * self.config.layout.first_line_indent_em)
-        first = True
-        for paragraph in text.split("\n"):
-            if not paragraph.strip():
-                self.y += gap
-                continue
-            first_width = self.content_w - indent
-            lines = wrap_text(self.engine, paragraph.strip(), size, first_width if first else self.content_w)
-            for line_index, line in enumerate(lines):
-                self._ensure_space(line_h)
-                x = self.margin_left + (indent if first and line_index == 0 else 0)
-                width = self.content_w - (indent if first and line_index == 0 else 0)
-                justify = self._should_justify_paragraph_line(line, line_index, len(lines), size, width)
-                self._paste_text(line, x, self.y, size, width, justify=justify)
-                self.y += line_h
-            first = False
-        self.y += gap
+        parts: list[InlinePart] = []
+        for index, line in enumerate(text.split("\n")):
+            if index:
+                parts.append(InlinePart("hardbreak"))
+            parts.append(InlinePart("text", line))
+        self._draw_rich_paragraph(parts)
 
-    def _draw_rich_paragraph(self, parts: list[InlinePart]) -> None:
+    def _draw_rich_paragraph(self, parts: list[InlinePart], no_indent: bool = False) -> None:
         size = pt_to_px(self.config.handwriting.body_font_pt, self.dpi)
         normal_line_h = round(size * self.config.handwriting.line_spacing)
         gap = mm_to_px(self.config.layout.paragraph_gap_mm, self.dpi)
-        indent = round(size * self.config.layout.first_line_indent_em)
+        indent = 0 if no_indent else min(max(0, self.content_w - 1), round(size * self.config.layout.first_line_indent_em))
         lines = self._layout_rich_parts(
             parts,
             size,
@@ -283,7 +277,10 @@ class ReportRenderer:
             x = self.margin_left + (indent if is_first else 0)
             width = self.content_w - (indent if is_first else 0)
             self._ensure_space(line.height)
-            self._paste_rich_line(line, x, self.y, width)
+            self._paste_rich_line(
+                line, x, self.y, width,
+                justify=self.config.layout.justify_paragraphs and line.wrapped and line.width >= width * 0.78,
+            )
             self.y += line.height
         self.y += gap
 
@@ -297,97 +294,178 @@ class ReportRenderer:
         first_line_width: int | None = None,
     ) -> list[_RichLine]:
         """Lay out mixed handwriting and LaTeX for every inline-capable block."""
-        raw_lines: list[tuple[int, list[tuple[str, object, int]]]] = []
-        current: list[tuple[str, object, int]] = []
-        used = 0
-        line_index = 0
-
-        def current_width() -> int:
-            if line_index == 0 and first_line_width is not None:
-                return max(1, first_line_width)
-            return max(1, max_width)
-
-        def flush() -> None:
-            nonlocal current, used, line_index
-            while current and current[-1][0] == "text" and not str(current[-1][1]).strip():
-                current.pop()
-            if current:
-                raw_lines.append((current_width(), current))
-                line_index += 1
-            current = []
-            used = 0
-
-        def add_item(kind: str, value: object, width: int) -> None:
-            nonlocal used
-            if current and used + width > current_width():
-                if kind != "text" or not starts_with_forbidden_line_punctuation(str(value)):
-                    flush()
-            if kind == "text" and not str(value).strip() and not current:
-                return
-            current.append((kind, value, width))
-            used += width
-
+        # A group is a word/character/formula together with its closing
+        # punctuation. It moves to the next line as a unit whenever possible.
+        groups: list[list[tuple[str, object]]] = []
         for part_index, part in enumerate(parts):
-            if part.kind == "break":
-                flush()
+            if part.kind in {"break", "hardbreak"}:
+                groups.append([(part.kind, "")])
             elif part.kind == "math":
                 try:
                     box = self.formula_renderer.render_inline(
-                        part.text,
-                        size,
-                        max_width,
+                        part.text, size, max(1, max_width),
                         seed_extra=f"{seed_extra}:math:{part_index}",
                     )
                 except LatexRenderError as error:
                     self._report_formula_error(part.text, error)
-                    box = self.formula_renderer.blank_inline(part.text, size, max_width)
-                add_item("math", box, box.width)
+                    box = self.formula_renderer.blank_inline(part.text, size, max(1, max_width))
+                groups.append([("math", box)])
             else:
                 for unit in _inline_units(westernize_punctuation(part.text)):
-                    add_item("text", unit, round(self.engine.measure(unit, size)))
-        flush()
+                    if starts_with_forbidden_line_punctuation(unit) and groups and groups[-1][0][0] not in {"break", "hardbreak"}:
+                        groups[-1].append(("text", unit))
+                    else:
+                        groups.append([("text", unit)])
 
+        pending = deque(groups)
         lines: list[_RichLine] = []
-        for raw_index, (line_width, raw_line) in enumerate(raw_lines):
-            visuals: list[tuple[Image.Image, int]] = []
-            text_buffer = ""
-            visual_index = 0
+        measurements: dict[str, float] = {}
 
-            def flush_text() -> None:
-                nonlocal text_buffer, visual_index
-                if not text_buffer:
-                    return
-                image = self.engine.render_line(
-                    text_buffer.rstrip(),
-                    size,
-                    line_width,
-                    seed_extra=f"{seed_extra}:line:{raw_index}:text:{visual_index}",
-                )
-                visuals.append((image, round(image.height * 0.76)))
-                text_buffer = ""
-                visual_index += 1
+        def measure(text: str) -> float:
+            if text not in measurements:
+                measurements[text] = self.engine.measure(text, size)
+            return measurements[text]
 
-            for kind, value, _ in raw_line:
+        def nominal_width(items: list[tuple[str, object]]) -> float:
+            width = 0.0
+            buffer = ""
+            for kind, value in items:
                 if kind == "text":
-                    text_buffer += str(value)
+                    buffer += str(value)
                 else:
-                    flush_text()
-                    box = value
-                    visuals.append((box.image, box.baseline))
-                    visual_index += 1
-            flush_text()
-            baseline = max((base for _, base in visuals), default=round(size * 0.76))
-            descent = max((image.height - base for image, base in visuals), default=normal_line_h - baseline)
-            line_h = max(normal_line_h, baseline + descent)
-            lines.append(
-                _RichLine(
-                    visuals=visuals,
-                    width=sum(image.width for image, _ in visuals),
-                    height=line_h,
-                    baseline=baseline,
-                )
-            )
+                    width += measure(buffer) + value.width
+                    buffer = ""
+            return width + measure(buffer)
+
+        def flatten(selected):
+            return [item for group in selected for item in group]
+
+        def whitespace(group) -> bool:
+            return all(kind == "text" and not str(value).strip() for kind, value in group)
+
+        while pending:
+            line_width = max(1, first_line_width if not lines and first_line_width is not None else max_width)
+            selected: list[list[tuple[str, object]]] = []
+            while pending:
+                group = pending[0]
+                if group[0][0] in {"break", "hardbreak"}:
+                    break
+                if not selected and whitespace(group):
+                    pending.popleft()
+                    continue
+                if selected and nominal_width(flatten([*selected, group])) > line_width:
+                    break
+                selected.append(pending.popleft())
+                if nominal_width(flatten(selected)) > line_width:
+                    break
+            while selected and whitespace(selected[-1]):
+                selected.pop()
+            if not selected:
+                if pending and pending[0][0][0] in {"break", "hardbreak"}:
+                    if pending.popleft()[0][0] == "hardbreak":
+                        lines.append(_RichLine([], 0, normal_line_h, round(size * 0.76)))
+                continue
+
+            line_seed = f"{seed_extra}:line:{len(lines)}"
+            line = self._render_rich_items(flatten(selected), size, line_width, normal_line_h, line_seed)
+            # Font overhang, ink perturbations and image padding all contribute
+            # to the visible width. Reflow using that width before pasting.
+            while line.width > line_width and len(selected) > 1:
+                pending.appendleft(selected.pop())
+                while selected and whitespace(selected[-1]):
+                    pending.appendleft(selected.pop())
+                line = self._render_rich_items(flatten(selected), size, line_width, normal_line_h, line_seed)
+            if line.width > line_width and all(kind == "text" for kind, _ in selected[0]):
+                text = "".join(str(value) for _, value in selected[0])
+                # An overlong word must be splittable, including its first line.
+                low, high, cut = 1, len(text) - 1, 0
+                while low <= high:
+                    middle = (low + high) // 2
+                    candidate = self._render_rich_items([("text", text[:middle])], size, line_width, normal_line_h, line_seed)
+                    if candidate.width <= line_width:
+                        cut = middle
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                cut = max(1, cut)
+                preferred = cut
+                while preferred > 0 and starts_with_forbidden_line_punctuation(text[preferred:]):
+                    preferred -= 1
+                # A punctuation sequence longer than a whole line is an
+                # unavoidable exception to the usual no-leading-punctuation rule.
+                cut = preferred or cut
+                if cut < len(text):
+                    pending.appendleft([("text", text[cut:])])
+                    line = self._render_rich_items([("text", text[:cut])], size, line_width, normal_line_h, line_seed)
+            if line.width > line_width:
+                # A single formula or glyph may exceed even an empty line.
+                line = self._fit_rich_line(line, line_width, normal_line_h)
+            while pending and whitespace(pending[0]):
+                pending.popleft()
+            if pending and pending[0][0][0] in {"break", "hardbreak"}:
+                pending.popleft()
+            else:
+                line.wrapped = bool(pending)
+            lines.append(line)
         return lines
+
+    def _render_rich_items(
+        self, items: list[tuple[str, object]], size: int, max_width: int,
+        normal_line_h: int, seed_extra: str,
+    ) -> _RichLine:
+        visuals: list[tuple[Image.Image, int]] = []
+        text_buffer = ""
+
+        def blank_space(text: str) -> None:
+            if text:
+                width = max(1, math.ceil(self.engine.measure(text, size)))
+                visuals.append((Image.new("RGBA", (width, size)), round(size * 0.76)))
+
+        def flush_text() -> None:
+            nonlocal text_buffer
+            if not text_buffer:
+                return
+            core = text_buffer.strip()
+            if not core:
+                blank_space(text_buffer)
+            else:
+                leading = len(text_buffer) - len(text_buffer.lstrip())
+                trailing = len(text_buffer) - len(text_buffer.rstrip())
+                blank_space(text_buffer[:leading])
+                image, baseline = self.engine.render_line(
+                    core, size, max_width,
+                    seed_extra=f"{seed_extra}:text:{len(visuals)}", return_baseline=True,
+                )
+                visuals.append((image, baseline))
+                if trailing:
+                    blank_space(text_buffer[-trailing:])
+            text_buffer = ""
+
+        for kind, value in items:
+            if kind == "text":
+                text_buffer += str(value)
+            else:
+                flush_text()
+                visuals.append((value.image, value.baseline))
+        flush_text()
+        baseline = max((base for _, base in visuals), default=round(size * 0.76))
+        descent = max((image.height - base for image, base in visuals), default=normal_line_h - baseline)
+        return _RichLine(visuals, sum(image.width for image, _ in visuals), max(normal_line_h, baseline + descent), baseline)
+
+    @staticmethod
+    def _fit_rich_line(line: _RichLine, width: int, normal_line_h: int) -> _RichLine:
+        if len(line.visuals) == 1:
+            image = line.visuals[0][0]
+        else:
+            image = Image.new("RGBA", (line.width, line.height))
+            x = 0
+            for visual, baseline in line.visuals:
+                image.alpha_composite(visual, (x, line.baseline - baseline))
+                x += visual.width
+        scale = width / line.width
+        image = image.resize((width, max(1, round(image.height * scale))), Image.Resampling.LANCZOS)
+        baseline = max(1, round(line.baseline * scale))
+        return _RichLine([(image, baseline)], width, max(normal_line_h, image.height), baseline)
 
     def _paste_rich_line(
         self,
@@ -396,7 +474,17 @@ class ReportRenderer:
         y: int,
         max_width: int,
         align: str = "left",
+        justify: bool = False,
     ) -> None:
+        if justify and align == "left" and line.width > 0 and 1.0 < max_width / line.width <= 1.18:
+            image = Image.new("RGBA", (line.width, line.height))
+            cursor_x = 0
+            for visual, baseline in line.visuals:
+                image.alpha_composite(visual, (cursor_x, line.baseline - baseline))
+                cursor_x += visual.width
+            image = image.resize((max_width, line.height), Image.Resampling.BICUBIC)
+            self.page.alpha_composite(image, (round(x), round(y)))
+            return
         if align == "center":
             x += max(0, (max_width - line.width) // 2)
         elif align == "right":
@@ -505,9 +593,14 @@ class ReportRenderer:
         y1 = y0 + height
         if self.config.layout.image_placeholder_border:
             self._rough_rect(x0, y0, x1, y1, color(self.config.handwriting.ink_color, 90), width=1)
-        caption = westernize_punctuation(f"图: {block.alt or block.src or '插图空白'}")
+        self.figure_counter += 1
+        title = block.alt or block.src or "插图空白"
+        caption = f"图{self.figure_counter}：{title}" if self.config.layout.number_figures else title
         size = pt_to_px(self.config.handwriting.body_font_pt - 1, self.dpi)
-        self._paste_text(caption, x0, y1 + mm_to_px(1.5, self.dpi), size, self.content_w, align="center")
+        self._paste_text(
+            caption, x0, y1 + mm_to_px(1.5, self.dpi), size, self.content_w,
+            align="center", preserve_punctuation=True,
+        )
         self.y = y1 + caption_h
 
     def _draw_table(self, block: TableBlock) -> None:
@@ -549,15 +642,105 @@ class ReportRenderer:
         self.y += mm_to_px(self.config.layout.table_gap_mm, self.dpi)
 
     def _table_widths(self, block: TableBlock, col_count: int, size: int) -> list[int]:
-        weights = [1.0] * col_count
+        if col_count == 0:
+            return []
+        if self.content_w < col_count:
+            raise ValueError("当前页面宽度不足以容纳这么多列，请减少列数或增大页面宽度。")
+        pad = max(0, mm_to_px(self.config.layout.table_cell_padding_mm, self.dpi))
+        minimum = [1.0 + 2 * pad] * col_count
+        preferred = minimum.copy()
+        formula_widths: dict[str, int] = {}
+        text_widths: dict[str, float] = {}
+        # Handwriting rasters retain four transparent pixels on each side;
+        # include that footprint so a short header need not wrap by one pixel.
+        ink_slack = max(8, math.ceil(size * 0.15))
+
+        def text_width(text: str) -> float:
+            if text not in text_widths:
+                text_widths[text] = self.engine.measure(text, size) + (ink_slack if text.strip() else 0)
+            return text_widths[text]
+
+        def formula_width(latex: str) -> int:
+            if latex not in formula_widths:
+                # Measuring must not advance the live renderer's geometry or
+                # ink RNGs. A fixed per-formula seed also makes column order
+                # irrelevant to the width estimate.
+                probe = FormulaRenderer(self.engine, seed=f"{self.config.handwriting.seed}:table:{latex}")
+                try:
+                    box = probe.render_inline(latex, size, self.content_w, seed_extra="table:measure")
+                except LatexRenderError:
+                    # The actual cell render reports the error once.
+                    box = probe.blank_inline(latex, size, self.content_w)
+                formula_widths[latex] = box.width
+            return formula_widths[latex]
+
         for row in [block.headers, *block.rows]:
             for index, cell in enumerate(row[:col_count]):
-                weights[index] = max(weights[index], self.engine.measure(parts_to_text(cell), size))
-        total = sum(weights) or col_count
-        widths = [max(mm_to_px(18, self.dpi), round(self.content_w * weight / total)) for weight in weights]
-        delta = self.content_w - sum(widths)
-        widths[-1] += delta
-        return widths
+                line_width = 0.0
+                text_buffer = ""
+
+                def flush_text() -> None:
+                    nonlocal text_buffer, line_width
+                    if text_buffer:
+                        line_width += text_width(text_buffer)
+                        for unit in _inline_units(text_buffer):
+                            if unit.strip():
+                                minimum[index] = max(minimum[index], text_width(unit) + 2 * pad)
+                        text_buffer = ""
+
+                for part in cell:
+                    if part.kind in {"break", "hardbreak"}:
+                        flush_text()
+                        preferred[index] = max(preferred[index], line_width + 2 * pad)
+                        line_width = 0.0
+                    elif part.kind == "math":
+                        flush_text()
+                        width = formula_width(part.text)
+                        line_width += width
+                        minimum[index] = max(minimum[index], width + 2 * pad)
+                    else:
+                        text_buffer += westernize_punctuation(part.text)
+                flush_text()
+                preferred[index] = max(preferred[index], line_width + 2 * pad)
+
+        # Demands wider than the whole table cannot be satisfied without
+        # wrapping or scaling, and must not dominate the other columns.
+        preferred = [min(self.content_w, max(want, need)) for want, need in zip(preferred, minimum)]
+        minimum = [min(need, want) for need, want in zip(minimum, preferred)]
+        base = mm_to_px(18, self.dpi)
+        if base * col_count > self.content_w:
+            base = max(1.0, self.content_w / (2 * col_count))
+        widths = [min(float(base), want) for want in preferred]
+        remaining = self.content_w - sum(widths)
+
+        def grow_towards(targets: list[float]) -> None:
+            nonlocal remaining
+            active = [i for i in range(col_count) if targets[i] > widths[i] + 1e-9]
+            while active and remaining > 1e-9:
+                step = min(remaining / len(active), min(targets[i] - widths[i] for i in active))
+                for i in active:
+                    widths[i] += step
+                remaining = max(0.0, remaining - step * len(active))
+                active = [i for i in active if targets[i] > widths[i] + 1e-9]
+
+        # Equal increments with satisfied columns frozen protect short fields
+        # and formulas before spending the remaining room on long paragraphs.
+        grow_towards(minimum)
+        grow_towards(preferred)
+        widths = [width + remaining / col_count for width in widths]
+        rounded = [max(1, math.floor(width)) for width in widths]
+        remainder = self.content_w - sum(rounded)
+        order = sorted(range(col_count), key=lambda i: widths[i] - rounded[i], reverse=True)
+        for i in order[:remainder]:
+            rounded[i] += 1
+        return rounded
+
+    def _table_content_geometry(self, width: int, pad: int) -> tuple[int, int]:
+        # Narrow tables sacrifice horizontal padding before squeezing their
+        # content below one em. Layout and pasting must use the same budget.
+        size = pt_to_px(self.config.handwriting.body_font_pt - 1, self.dpi)
+        horizontal_pad = min(max(0, pad), max(0, (width - min(width, size)) // 2))
+        return horizontal_pad, max(1, width - 2 * horizontal_pad)
 
     def _table_row_layout(
         self,
@@ -572,10 +755,11 @@ class ReportRenderer:
         content_height = line_h
         for index, width in enumerate(widths):
             cell = row[index] if index < len(row) else []
+            _, available = self._table_content_geometry(width, pad)
             lines = self._layout_rich_parts(
                 cell,
                 size,
-                max(10, width - 2 * pad),
+                available,
                 line_h,
                 seed_extra=f"{seed_extra}:cell:{index}",
             )
@@ -605,8 +789,9 @@ class ReportRenderer:
             self._rough_line(x, y0, x, y1, ink, width=1)
         for index, width in enumerate(widths):
             y = y0 + pad
+            horizontal_pad, available = self._table_content_geometry(width, pad)
             for line in cells[index]:
-                self._paste_rich_line(line, x_positions[index] + pad, y, width - 2 * pad)
+                self._paste_rich_line(line, x_positions[index] + horizontal_pad, y, available)
                 y += line.height
         self.y = y1
 
@@ -625,9 +810,14 @@ class ReportRenderer:
         align: str = "left",
         math: bool = False,
         justify: bool = False,
+        preserve_punctuation: bool = False,
     ) -> None:
-        text = westernize_punctuation(text)
+        if not preserve_punctuation:
+            text = westernize_punctuation(text)
         image = self.engine.render_line(text, size, max_width, seed_extra=f"{len(self.pages)}:{x}:{y}", math=math)
+        if image.width > max_width:
+            scale = max_width / image.width
+            image = image.resize((max_width, max(1, round(image.height * scale))), Image.Resampling.LANCZOS)
         if justify and align == "left" and image.width > 1:
             stretch = max_width / image.width
             if 1.0 < stretch <= 1.18:
@@ -646,7 +836,7 @@ class ReportRenderer:
         size: int,
         width: int,
     ) -> bool:
-        if line_index >= line_count - 1:
+        if not self.config.layout.justify_paragraphs or line_index >= line_count - 1:
             return False
         measured = self.engine.measure(line, size)
         return measured >= width * 0.78

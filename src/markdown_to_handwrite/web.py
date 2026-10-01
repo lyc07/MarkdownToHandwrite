@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlparse
 
 from PIL import Image, ImageColor
 
-from .config import ReportConfig, config_from_dict
+from .config import ReportConfig, config_from_dict, validate_layout_options
 from .markdown_parser import parse_markdown
 from .renderer import PROJECT_ROOT, ReportRenderer
 
@@ -118,9 +118,9 @@ CONFIG_SECTIONS: list[dict[str, Any]] = [
     },
     {
         "id": "typography",
-        "title": "字体与字号",
+        "title": "字体、字号与字距",
         "eyebrow": "TYPE",
-        "description": "只决定字符尺寸、排版度量和非 SDT 符号的中心线形状",
+        "description": "调整字号、字符间距和间距变化，选择字体",
         "fields": [
             _text("handwriting.font_path", "正文字体", "SDT 中文不使用其轮廓；该字体负责排版度量，以及英文、数字和缺失符号的中心线形状。", "font-path"),
             _text("handwriting.math_font_path", "数学字体", "只决定数学符号的排版度量与中心线形状；留空时沿用正文字体。", "font-path"),
@@ -132,7 +132,8 @@ CONFIG_SECTIONS: list[dict[str, Any]] = [
             _range("handwriting.h2_font_pt", "二级标题", 10, 40, 0.5, "pt", "只放大字符结构，不额外加粗。"),
             _range("handwriting.h3_font_pt", "三级标题", 9, 34, 0.5, "pt", "只放大字符结构，不额外加粗。"),
             _range("handwriting.line_spacing", "行距倍率", 1.0, 2.5, 0.01, "×", "只控制行框高度，不改变字符形状或笔画粗细。"),
-            _range("handwriting.word_spacing_px", "字间距", -12, 24, 1, "px", "统一加到所有字符的排版前进宽度。"),
+            _range("handwriting.word_spacing_px", "字符间距", -12, 24, 0.5, "px", "在非空格字符的前进量上增减输出像素；负值更紧，正值更疏，不改变空格本身的宽度。"),
+            _range("handwriting.advance_jitter_sigma_ratio", "字距随机扰动 σ", 0, 0.1, 0.001, "em", "实际标准差为当前字号乘以该比例；默认 0.01，设为 0 可关闭字符前进量的随机变化。"),
         ],
     },
     {
@@ -201,9 +202,11 @@ CONFIG_SECTIONS: list[dict[str, Any]] = [
         "id": "layout",
         "title": "文档布局",
         "eyebrow": "LAYOUT",
-        "description": "标题编号、段落节奏、表格与图片留白",
+        "description": "标题与插图编号、段落节奏、表格与图片留白",
         "fields": [
             _toggle("layout.number_sections", "自动编号章节"),
+            _toggle("layout.number_figures", "自动编号插图", "按文档图片顺序从 1 编号，显示“图1：图片标题”；关闭时只显示图片标题。"),
+            _toggle("layout.justify_paragraphs", "拉伸至右侧对齐", "正文自然折行且够满的非末行最多拉伸 18%；含公式或 <br> 的段落同样适用，显式换行和段尾不拉伸。"),
             _range("layout.paragraph_gap_mm", "段后间距", 0, 12, 0.1, "mm"),
             _range("layout.heading_gap_before_mm", "标题前间距", 0, 18, 0.5, "mm"),
             _range("layout.heading_gap_after_mm", "标题后间距", 0, 14, 0.5, "mm"),
@@ -334,6 +337,7 @@ def build_bootstrap() -> dict[str, Any]:
 
 
 def validate_config(config: ReportConfig) -> None:
+    validate_layout_options(config)
     if not 4.0 <= config.handwriting.sdt_stroke_width <= 32.0:
         raise ValueError("SDT 统一笔画粗细必须在 4 到 32 之间。")
     if not 1 <= config.handwriting.sdt_supersample <= 8:

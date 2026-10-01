@@ -49,7 +49,8 @@ class HandwritingConfig:
     h2_font_pt: float = 17.0  # 二级标题字号，单位 pt；不会额外加粗。
     h3_font_pt: float = 15.0  # 三级标题字号，单位 pt；不会额外加粗。
     line_spacing: float = 1.55  # 行高相对于当前字号的倍数。
-    word_spacing_px: int = -1  # 每个字符排版前进量的附加像素；负值表示适度收紧。
+    word_spacing_px: float = -1.0  # 非空格字符前进量的附加输出像素；负值收紧，正值放宽。
+    advance_jitter_sigma_ratio: float = 0.01  # 字符前进量随机扰动的标准差，相对当前字号；0 表示关闭。
     perturb_theta_sigma: float = 0.008  # 字符旋转角度的正态分布标准差，单位 rad。
     perturb_x_sigma_px: float | None = None  # 字符水平偏移标准差，单位 px；None 时取字号的 1.5%。
     perturb_y_sigma_px: float | None = None  # 正文字符垂直偏移标准差，单位 px；None 时取字号的 1.5%。
@@ -82,6 +83,8 @@ class HandwritingConfig:
 @dataclass
 class LayoutConfig:
     number_sections: bool = False  # 是否自动为一至三级标题添加章节编号。
+    number_figures: bool = False  # 是否按文档图片顺序从 1 编号；关闭时只显示图片标题。
+    justify_paragraphs: bool = True  # 正文自然折行且够满的非末行向右拉伸，最多 18%；显式换行和段尾不拉伸。
     show_page_numbers: bool = False  # 是否在页面底部绘制页码。
     paragraph_gap_mm: float = 2.2  # 段落结束后的垂直间距，单位 mm。
     heading_gap_before_mm: float = 5.0  # 标题前的垂直间距，单位 mm。
@@ -110,6 +113,7 @@ def load_config(path: str | Path | None = None) -> ReportConfig:
         return config
     data = _migrate_config(json.loads(Path(path).read_text(encoding="utf-8")))
     _update_dataclass(config, data)
+    validate_layout_options(config)
     return config
 
 
@@ -120,7 +124,27 @@ def config_from_dict(data: dict[str, Any]) -> ReportConfig:
     data = _migrate_config(data)
     config = ReportConfig()
     _update_dataclass(config, data)
+    validate_layout_options(config)
     return config
+
+
+def validate_layout_options(config: ReportConfig) -> None:
+    """Validate shared spacing and layout controls for JSON, CLI, and web entry points."""
+    for value, minimum, maximum, label in (
+        (config.handwriting.word_spacing_px, -12.0, 24.0, "字符间距"),
+        (config.handwriting.advance_jitter_sigma_ratio, 0.0, 0.1, "字距随机扰动 σ"),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError(f"{label}必须是 {minimum:g} 到 {maximum:g} 之间的有限数值。")
+    if not isinstance(config.layout.justify_paragraphs, bool):
+        raise ValueError("拉伸至右侧对齐必须是布尔值 true 或 false。")
+    if not isinstance(config.layout.number_figures, bool):
+        raise ValueError("自动编号插图必须是布尔值 true 或 false。")
 
 
 def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:

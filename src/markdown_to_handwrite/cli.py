@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, validate_layout_options
 from .markdown_parser import parse_markdown
 from .renderer import ReportRenderer
 
@@ -20,11 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ink-color", help="Override ink color, e.g. #17233b.")
     parser.add_argument("--seed", help="Override random seed.")
     parser.add_argument("--dpi", type=int, help="Override render DPI.")
+    parser.add_argument("--char-spacing", type=float, help="Character advance adjustment in output pixels (-12 to 24).")
+    parser.add_argument("--spacing-jitter", type=float, help="Character advance jitter sigma as a font-size ratio (0 to 0.1; 0 disables it).")
+    justification = parser.add_mutually_exclusive_group()
+    justification.add_argument("--justify", dest="justify", action="store_true", help="Stretch eligible wrapped paragraph lines toward the right margin (up to 18%%).")
+    justification.add_argument("--no-justify", dest="justify", action="store_false", help="Disable paragraph line stretching.")
+    parser.set_defaults(justify=None)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     input_path = Path(args.input)
     config = load_config(args.config)
     if args.background:
@@ -45,6 +52,16 @@ def main(argv: list[str] | None = None) -> int:
         config.handwriting.seed = args.seed
     if args.dpi:
         config.page.dpi = args.dpi
+    if args.char_spacing is not None:
+        config.handwriting.word_spacing_px = args.char_spacing
+    if args.spacing_jitter is not None:
+        config.handwriting.advance_jitter_sigma_ratio = args.spacing_jitter
+    if args.justify is not None:
+        config.layout.justify_paragraphs = args.justify
+    try:
+        validate_layout_options(config)
+    except ValueError as error:
+        parser.error(str(error))
 
     source = input_path.read_text(encoding="utf-8")
     blocks = parse_markdown(source)

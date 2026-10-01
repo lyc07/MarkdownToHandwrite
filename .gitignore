@@ -6,6 +6,10 @@ __pycache__/
 .ruff_cache/
 output/
 tmp/
+background/
+.idea/
+examples/test.md
+examples/cooling_rate.md
 dist/
 build/
 *.egg-info/

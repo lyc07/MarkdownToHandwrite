@@ -295,6 +295,12 @@ class MathBox:
         return self.image.height
 
 
+@dataclass(frozen=True)
+class _DisplayRow:
+    body: MathNode | list["_DisplayRow"]
+    tag: MathNode | None = None
+
+
 class LatexMathParser:
     def __init__(self, source: str):
         self.source = source
@@ -533,6 +539,9 @@ class FormulaRenderer:
 
     def render(self, latex: str, size_px: int, max_width: int, seed_extra: str = "") -> Image.Image:
         latex = westernize_punctuation(latex)
+        if _has_equation_tag(latex):
+            rows = _parse_display_rows(_strip_math_delimiters(latex))
+            return self._layout_display_rows(rows, size_px, max_width, seed_extra).image
         line_boxes: list[MathBox] = []
         for index, line in enumerate(_formula_lines(latex)):
             if not line.strip():
@@ -564,6 +573,8 @@ class FormulaRenderer:
 
     def render_inline(self, latex: str, size_px: int, max_width: int, seed_extra: str = "") -> MathBox:
         latex = westernize_punctuation(latex)
+        if _has_equation_tag(latex):
+            raise LatexRenderError(r"\tag is only supported in display formulas.")
         lines = _formula_lines(latex)
         if len(lines) != 1:
             image = self.render(latex, size_px, max_width, seed_extra)
@@ -579,6 +590,65 @@ class FormulaRenderer:
         scale = max_width / box.width
         image = box.image.resize((max_width, max(1, round(box.height * scale))), Image.Resampling.LANCZOS)
         return MathBox(image, max(1, round(box.baseline * scale)))
+
+    def _layout_display_rows(
+        self, rows: list[_DisplayRow], size_px: int, max_width: int, seed_extra: str,
+    ) -> MathBox:
+        boxes: list[MathBox] = []
+        gap = max(4, round(size_px * 0.4))
+        for index, row in enumerate(rows):
+            line_seed = f"{seed_extra}:display:{index}"
+            if isinstance(row.body, list):
+                box = self._layout_display_rows(row.body, size_px, max_width, line_seed)
+            else:
+                box = self._layout_with_weight_group(row.body, size_px, line_seed, display_style=True)
+                box = self._fit_display_box(box, max_width)
+            if row.tag is not None:
+                tag = self._layout_with_weight_group(row.tag, size_px, line_seed, display_style=False)
+                tag = self._fit_display_box(tag, max_width)
+                box = self._place_equation_tag(box, tag, size_px, max_width)
+            boxes.append(box)
+        if not boxes:
+            return MathBox(self.blank_display(size_px), round(size_px * 0.75))
+        width = max(box.width for box in boxes)
+        height = sum(box.height for box in boxes) + gap * (len(boxes) - 1)
+        image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        y = 0
+        for box in boxes:
+            image.alpha_composite(box.image, ((width - box.width) // 2, y))
+            y += box.height + gap
+        # The middle of a multiline group is its math axis; single rows retain
+        # their actual baseline (including fractions and scripts).
+        baseline = boxes[0].baseline if len(boxes) == 1 else height // 2 + round(size_px * 0.25)
+        return MathBox(image, min(height, baseline))
+
+    @staticmethod
+    def _fit_display_box(box: MathBox, max_width: int) -> MathBox:
+        if box.width <= max_width:
+            return box
+        scale = max_width / box.width
+        image = box.image.resize((max_width, max(1, round(box.height * scale))), Image.Resampling.LANCZOS)
+        return MathBox(image, max(1, round(box.baseline * scale)))
+
+    @staticmethod
+    def _place_equation_tag(body: MathBox, tag: MathBox, size_px: int, max_width: int) -> MathBox:
+        gap = max(4, round(size_px * 0.8))
+        body_x = (max_width - body.width) // 2
+        tag_x = max_width - tag.width
+        if body_x + body.width + gap <= tag_x:
+            baseline = max(body.baseline, tag.baseline)
+            body_y = baseline - body.baseline
+            tag_y = baseline - tag.baseline
+        else:
+            # Keep the formula centered and the label readable on narrow pages.
+            body_y = 0
+            tag_y = body.height + max(4, round(size_px * 0.4))
+            baseline = body.baseline
+        height = max(body_y + body.height, tag_y + tag.height)
+        image = Image.new("RGBA", (max_width, height), (0, 0, 0, 0))
+        image.alpha_composite(body.image, (body_x, body_y))
+        image.alpha_composite(tag.image, (tag_x, tag_y))
+        return MathBox(image, baseline)
 
     def blank_display(self, size_px: int) -> Image.Image:
         return Image.new("RGBA", (1, max(1, round(size_px * 1.25))), (0, 0, 0, 0))
@@ -848,12 +918,12 @@ class FormulaRenderer:
         rule_curve = self._rule_curve(body_x, rule_y, width - 1, rule_y + tilt, bend, jitter, size_px)
         self._pen_stroke(
             image,
-            [
+            _connected_root_path([
                 (prefix_w + 1, baseline - round(size_px * 0.03)),
                 (prefix_w + round(radical_width * 0.2), valley_y),
                 (prefix_w + round(radical_width * 0.34), valley_y - round(size_px * 0.03)),
                 *rule_curve,
-            ],
+            ], stroke),
             stroke,
         )
         return MathBox(image, baseline)
@@ -1268,6 +1338,48 @@ class FormulaRenderer:
         return magnitude if self.random.random() < 0.5 else -magnitude
 
 
+def _connected_root_path(
+    points: list[tuple[float, float]], stroke: float,
+) -> list[tuple[float, float]]:
+    """Join the root's lower turns and overbar with short quadratic curves."""
+    rounded = [points[0]]
+    radius = max(1.0, stroke * 1.5)
+    for index in range(1, 4):
+        previous, corner, following = points[index - 1:index + 2]
+        incoming = math.dist(previous, corner)
+        outgoing = math.dist(corner, following)
+        if incoming == 0 or outgoing == 0:
+            rounded.append(corner)
+            continue
+        distance = min(radius, incoming * 0.4, outgoing * 0.4)
+        entry = tuple(c + (p - c) * distance / incoming for p, c in zip(previous, corner))
+        exit_point = tuple(c + (p - c) * distance / outgoing for p, c in zip(following, corner))
+        rounded.append(entry)
+        for step in range(1, 9):
+            t = step / 8
+            rounded.append(tuple(
+                (1 - t) ** 2 * a + 2 * (1 - t) * t * c + t ** 2 * b
+                for a, c, b in zip(entry, corner, exit_point)
+            ))
+    rounded.extend(points[4:])
+
+    # Keep adjacent samples within the pen's footprint. Long diagonal edges
+    # next to dense curve samples otherwise skew the outline normals and
+    # pinch the connecting ink, even though their centerlines meet.
+    connected = [rounded[0]]
+    max_step = max(0.4, stroke * 0.35)
+    for start, end in zip(rounded, rounded[1:]):
+        distance = math.dist(start, end)
+        if distance == 0:
+            continue
+        steps = max(1, math.ceil(distance / max_step))
+        connected.extend(
+            tuple(a + (b - a) * step / steps for a, b in zip(start, end))
+            for step in range(1, steps + 1)
+        )
+    return connected
+
+
 def _contains_fraction(node: MathNode) -> bool:
     if isinstance(node, FractionNode):
         return True
@@ -1292,10 +1404,119 @@ def _contains_fraction(node: MathNode) -> bool:
     return False
 
 
-def _formula_lines(latex: str) -> list[str]:
+_LATEX_TOKENS = re.compile(r"\\(?:begin|end)\s*\{[^{}]*\}|\\[a-zA-Z]+|\\[\s\S]|[{}]")
+_DISPLAY_ENVIRONMENT = re.compile(
+    r"\\begin\s*\{(?P<name>(?:aligned|align|equation|gathered)\*?)\}"
+    r"(?P<body>.*?)\\end\s*\{(?P=name)\}",
+    re.DOTALL,
+)
+
+
+def _has_equation_tag(source: str) -> bool:
+    return any(match.group() == r"\tag" for match in _LATEX_TOKENS.finditer(source))
+
+
+def _top_level_display_tokens(source: str):
+    """Scan control sequences without splitting groups or nested environments."""
+    depth = 0
+    environments: list[str] = []
+    for match in _LATEX_TOKENS.finditer(source):
+        token = match.group()
+        if token.startswith((r"\begin", r"\end")) and "{" in token:
+            name = token[token.index("{") + 1:-1]
+            if token.startswith(r"\begin"):
+                environments.append(name)
+            elif not environments or environments.pop() != name:
+                raise LatexRenderError(f"Mismatched environment: {name}.")
+        elif token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth < 0:
+                raise LatexRenderError("Unexpected closing brace.")
+        elif depth == 0 and not environments:
+            yield match
+    if depth:
+        raise LatexRenderError("Missing closing brace.")
+    if environments:
+        raise LatexRenderError(rf"Missing \end{{{environments[-1]}}}.")
+
+
+def _extract_equation_tag(source: str) -> tuple[str, MathNode | None]:
+    tag = None
+    pieces: list[str] = []
+    start = 0
+    for match in _top_level_display_tokens(source):
+        if match.group() != r"\tag":
+            continue
+        if tag is not None:
+            raise LatexRenderError("Multiple equation tags on the same formula.")
+        parser = LatexMathParser(source)
+        parser.index = match.end()
+        while parser.index < len(source) and source[parser.index].isspace():
+            parser.index += 1
+        starred = source[parser.index:parser.index + 1] == "*"
+        if starred:
+            parser.index += 1
+        while parser.index < len(source) and source[parser.index].isspace():
+            parser.index += 1
+        if source[parser.index:parser.index + 1] != "{":
+            raise LatexRenderError(r"Expected braced argument for \tag.")
+        tag = parser._parse_argument()
+        if not starred:
+            tag = RowNode([TextNode("("), tag, TextNode(")")])
+        pieces.extend((source[start:match.start()], " "))
+        start = parser.index
+    pieces.append(source[start:])
+    return "".join(pieces).strip(), tag
+
+
+def _parse_display_rows(source: str) -> list[_DisplayRow]:
+    sources: list[str] = []
+    start = 0
+    for match in _top_level_display_tokens(source):
+        if match.group() == r"\\":
+            sources.append(source[start:match.start()])
+            start = match.end()
+    sources.append(source[start:])
+    rows: list[_DisplayRow] = []
+    for line in sources:
+        if not line.strip():
+            continue
+        body, tag = _extract_equation_tag(line)
+        environment = _DISPLAY_ENVIRONMENT.fullmatch(body)
+        # The existing renderer also accepts styles and delimiters around
+        # multiline environments. Preserve those tokens when unwrapping them.
+        unwrapped = (
+            environment.group("body") if environment else re.sub(
+                r"\\(?:begin|end)\s*\{(?:aligned|align|equation|gathered)\*?\}", " ", body,
+            )
+        )
+        if unwrapped != body:
+            nested = _parse_display_rows(unwrapped)
+            if tag is not None and _display_rows_have_tags(nested):
+                raise LatexRenderError("Multiple equation tags on the same formula group.")
+            rows.append(_DisplayRow(nested, tag))
+        else:
+            rows.append(_DisplayRow(LatexMathParser(body).parse(), tag))
+    return rows
+
+
+def _display_rows_have_tags(rows: list[_DisplayRow]) -> bool:
+    return any(
+        row.tag is not None or (isinstance(row.body, list) and _display_rows_have_tags(row.body))
+        for row in rows
+    )
+
+
+def _strip_math_delimiters(latex: str) -> str:
     source = latex.strip()
     source = source.removeprefix("$$").removesuffix("$$").strip()
-    source = source.removeprefix(r"\[").removesuffix(r"\]").strip()
+    return source.removeprefix(r"\[").removesuffix(r"\]").strip()
+
+
+def _formula_lines(latex: str) -> list[str]:
+    source = _strip_math_delimiters(latex)
     if re.search(r"\\begin\{(?:matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|cases)\}", source):
         return [source]
     source = re.sub(r"\\begin\{(?:aligned|align|equation|gathered)\*?\}", "", source)

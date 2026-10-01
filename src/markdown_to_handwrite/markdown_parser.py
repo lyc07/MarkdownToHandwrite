@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from typing import Iterable
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_block import html_block
 
 from .latex_text import latex_to_hand_text
 from .typography import westernize_punctuation
@@ -33,6 +34,7 @@ class HeadingBlock:
 @dataclass
 class ParagraphBlock:
     parts: list[InlinePart]
+    no_indent: bool = False
 
 
 @dataclass
@@ -70,29 +72,42 @@ class RuleBlock:
     pass
 
 
-Block = HeadingBlock | ParagraphBlock | FormulaBlock | TableBlock | ImageBlock | ListBlock | CodeBlock | RuleBlock
+@dataclass
+class PageBreakBlock:
+    pass
+
+
+Block = HeadingBlock | ParagraphBlock | FormulaBlock | TableBlock | ImageBlock | ListBlock | CodeBlock | RuleBlock | PageBreakBlock
 
 
 def parse_markdown(source: str) -> list[Block]:
     source = _protect_block_math(source)
     parser = MarkdownIt("commonmark", {"html": True}).enable("table")
+    parser.block.ruler.before("html_block", "layout_directive", _layout_directive_block_rule, {"alt": ["paragraph", "reference", "blockquote"]})
+    parser.block.ruler.at("html_block", _html_block_rule, {"alt": ["paragraph", "reference", "blockquote"]})
     if dollarmath_plugin is not None:
         parser.use(dollarmath_plugin, allow_space=True, allow_digits=True)
     parser.inline.ruler.before("escape", "latex_math_inline", _latex_inline_rule)
     tokens = parser.parse(source)
     blocks: list[Block] = []
     index = 0
+    pending_no_indent = False
     while index < len(tokens):
         token = tokens[index]
+        if token.type not in {"paragraph_open", "noindent"}:
+            pending_no_indent = False
         if token.type == "heading_open":
             level = int(token.tag[1])
             parts = _inline_to_parts(tokens[index + 1])
             blocks.append(HeadingBlock(level=level, parts=parts))
             index += 3
         elif token.type == "paragraph_open":
-            parts = _inline_to_parts(tokens[index + 1])
-            _append_paragraph_or_images(blocks, parts)
+            parts = _inline_to_parts(tokens[index + 1], block_controls=True)
+            pending_no_indent = _append_paragraph_or_images(blocks, parts, no_indent=pending_no_indent)
             index += 3
+        elif token.type == "noindent":
+            pending_no_indent = True
+            index += 1
         elif token.type in {"math_block", "amsmath"}:
             blocks.append(FormulaBlock(token.content.strip()))
             index += 1
@@ -115,6 +130,9 @@ def parse_markdown(source: str) -> list[Block]:
         elif token.type == "hr":
             blocks.append(RuleBlock())
             index += 1
+        elif token.type == "page_break":
+            blocks.append(PageBreakBlock())
+            index += 1
         else:
             index += 1
     return _restore_block_math(blocks)
@@ -125,7 +143,7 @@ def parts_to_text(parts: Iterable[InlinePart]) -> str:
     for part in parts:
         if part.kind == "math":
             pieces.append(latex_to_hand_text(part.text))
-        elif part.kind == "break":
+        elif part.kind in {"break", "hardbreak"}:
             pieces.append("\n")
         elif part.kind == "code":
             pieces.append(part.text)
@@ -136,12 +154,12 @@ def parts_to_text(parts: Iterable[InlinePart]) -> str:
     return westernize_punctuation(_normalize_inline("".join(pieces)))
 
 
-def _inline_to_parts(token) -> list[InlinePart]:
+def _inline_to_parts(token, block_controls: bool = False) -> list[InlinePart]:
     parts: list[InlinePart] = []
     children = token.children or []
     if not children and token.content:
         return [InlinePart("text", token.content)]
-    for child in children:
+    for index, child in enumerate(children):
         if child.type == "text":
             parts.append(InlinePart("text", child.content))
         elif child.type == "code_inline":
@@ -157,26 +175,104 @@ def _inline_to_parts(token) -> list[InlinePart]:
                     src=child.attrGet("src") or "",
                 )
             )
-        elif child.type in {"softbreak", "hardbreak"}:
+        elif child.type == "softbreak":
+            # A source newline next to an HTML layout tag is formatting of the
+            # markup, not a second requested line break.
+            neighbors = children[max(0, index - 1):index] + children[index + 1:index + 2]
+            if any(
+                neighbor.type == "html_inline"
+                and _html_layout_parts(neighbor.content, block_controls) is not None
+                and not re.match(r"</?noindent(?=[\s/>])", neighbor.content, flags=re.I)
+                for neighbor in neighbors
+            ):
+                continue
             parts.append(InlinePart("break"))
+        elif child.type == "hardbreak":
+            parts.append(InlinePart("hardbreak"))
         elif child.type == "html_inline":
-            media = _html_media_parts(child.content)
-            if media:
-                parts.extend(media)
-            elif re.fullmatch(r"<br\s*/?>", child.content.strip(), flags=re.I):
-                parts.append(InlinePart("break"))
+            layout = _html_layout_parts(child.content, block_controls)
+            if layout is not None:
+                parts.extend(layout)
             else:
-                parts.append(InlinePart("text", child.content))
+                media = _html_media_parts(child.content)
+                parts.extend(media or [InlinePart("text", child.content)])
         elif child.children:
-            parts.extend(_inline_to_parts(child))
+            parts.extend(_inline_to_parts(child, block_controls))
     return parts
+
+
+def _layout_directive_block_rule(state, start_line: int, end_line: int, silent: bool) -> bool:
+    if state.is_code_block(start_line):
+        return False
+    # An unindented tag after a list belongs to the document. An indented tag
+    # inside a list item keeps the same literal behavior as its inline form.
+    if state.blkIndent and state.sCount[start_line] >= state.blkIndent:
+        return False
+    start = state.bMarks[start_line] + state.tShift[start_line]
+    line = state.src[start:state.eMarks[start_line]].strip()
+    match = re.fullmatch(r'''<(newpage|noindent)(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?\s*/?>''', line, flags=re.I)
+    if not match:
+        return False
+    if not silent:
+        token = state.push("page_break" if match.group(1).lower() == "newpage" else "noindent", "", 0)
+        token.map = [start_line, start_line + 1]
+        state.line = start_line + 1
+    return True
+
+
+def _html_block_rule(state, start_line: int, end_line: int, silent: bool) -> bool:
+    start = state.bMarks[start_line] + state.tShift[start_line]
+    line = state.src[start:state.eMarks[start_line]]
+    if re.match(r"</?(?:br|p|newpage|noindent|img)(?=[\s/>])", line, flags=re.I):
+        # Let Markdown tokenize controls and images inline so subsequent
+        # headings, page breaks, lists, and formulas are still parsed normally.
+        return False
+    return html_block(state, start_line, end_line, silent)
+
+
+class _HtmlLayoutParser(HTMLParser):
+    def __init__(self, block_controls: bool) -> None:
+        super().__init__(convert_charrefs=True)
+        self.block_controls = block_controls
+        self.recognized = False
+        self.parts: list[InlinePart] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "br":
+            self.recognized = True
+            self.parts.append(InlinePart("hardbreak"))
+        elif self.block_controls and tag in {"p", "newpage"}:
+            self.recognized = True
+            self.parts.append(InlinePart("paragraph_break" if tag == "p" else "page_break"))
+        elif self.block_controls and tag == "noindent":
+            self.recognized = True
+            self.parts.append(InlinePart("noindent"))
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.block_controls and tag in {"p", "newpage"}:
+            self.recognized = True
+            if tag == "p":
+                self.parts.append(InlinePart("paragraph_break"))
+        elif self.block_controls and tag == "noindent":
+            self.recognized = True
+            self.parts.append(InlinePart("noindent_end"))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+
+def _html_layout_parts(markup: str, block_controls: bool) -> list[InlinePart] | None:
+    parser = _HtmlLayoutParser(block_controls)
+    parser.feed(markup)
+    parser.close()
+    return parser.parts if parser.recognized else None
 
 
 def _latex_inline_rule(state, silent: bool) -> bool:
     """Parse standard LaTeX ``\\(...\\)`` before CommonMark consumes the slashes."""
     if not state.src.startswith(r"\(", state.pos):
         return False
-    closing = _find_unescaped_marker(state.src, r"\)", state.pos + 2)
+    closing = _find_latex_inline_end(state.src, state.pos + 2, state.posMax)
     if closing < 0:
         return False
     source = state.src[state.pos + 2:closing]
@@ -190,36 +286,63 @@ def _latex_inline_rule(state, silent: bool) -> bool:
     return True
 
 
-def _find_unescaped_marker(text: str, marker: str, start: int) -> int:
-    index = text.find(marker, start)
-    while index >= 0:
-        preceding = 0
-        probe = index - 1
-        while probe >= 0 and text[probe] == "\\":
-            preceding += 1
-            probe -= 1
-        if preceding % 2 == 0:
-            return index
-        index = text.find(marker, index + len(marker))
-    return -1
+def _find_latex_inline_end(text: str, start: int, end: int) -> int:
+    depth = 0
+    first_grouped_closing = -1
+    index = start
+    while index < end:
+        char = text[index]
+        if char == "\\":
+            # Skip escaped braces and paired backslashes. A closing marker
+            # inside a group such as \text{...} belongs to that group.
+            if text.startswith(r"\)", index) and index + 2 <= end:
+                if depth == 0:
+                    return index
+                if first_grouped_closing < 0:
+                    first_grouped_closing = index
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        index += 1
+    # Preserve the formula renderer's missing-brace diagnostic when the
+    # user supplies an outer delimiter but leaves a group unfinished.
+    return first_grouped_closing if depth else -1
 
 
-def _append_paragraph_or_images(blocks: list[Block], parts: list[InlinePart]) -> None:
+def _append_paragraph_or_images(
+    blocks: list[Block], parts: list[InlinePart], no_indent: bool = False,
+) -> bool:
+    """Return an unused no-indent directive for the immediately next paragraph."""
     current: list[InlinePart] = []
     for part in parts:
-        if part.kind == "image":
+        if part.kind == "noindent":
+            no_indent = True
+        elif part.kind == "noindent_end":
+            continue
+        elif part.kind in {"image", "paragraph_break", "page_break"}:
             if _has_text(current):
-                blocks.append(ParagraphBlock(current))
-                current = []
-            blocks.append(ImageBlock(alt=part.alt, src=part.src))
+                blocks.append(ParagraphBlock(current, no_indent=no_indent))
+                no_indent = False
+            current = []
+            if part.kind == "image":
+                blocks.append(ImageBlock(alt=part.alt, src=part.src))
+                no_indent = False
+            elif part.kind == "page_break":
+                blocks.append(PageBreakBlock())
+                no_indent = False
         else:
             current.append(part)
     if _has_text(current):
-        blocks.append(ParagraphBlock(current))
+        blocks.append(ParagraphBlock(current, no_indent=no_indent))
+        no_indent = False
+    return no_indent
 
 
 def _has_text(parts: list[InlinePart]) -> bool:
-    return bool(parts_to_text(parts).strip())
+    return bool(parts_to_text(parts).strip()) or any(part.kind == "hardbreak" for part in parts)
 
 
 class _HtmlMediaParser(HTMLParser):

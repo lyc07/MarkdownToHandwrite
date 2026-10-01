@@ -30,7 +30,7 @@ DEFAULT_SYSTEM_FONT_CANDIDATES = (
     "C:/Windows/Fonts/simsun.ttc",
 )
 GLYPH_VERTICAL_ADJUSTMENTS: dict[str, float] = {}
-FORBIDDEN_LINE_START_PUNCTUATION = frozenset(",.;:!?%)]}>\"'")
+FORBIDDEN_LINE_START_PUNCTUATION = frozenset(",.;:!?%)]}>\"'，。；：！？、）》】〉」』”’…")
 DEFAULT_RENDER_DPI = 180.0
 TEXT_STROKE_WEIGHT_SAMPLE = "永重力加速度ABC123"
 MATH_STROKE_WEIGHT_SAMPLE = "xTgabcmn0123456789+-=()[]"
@@ -88,10 +88,40 @@ class HandwritingEngine:
         return _load_font(paths[index], size_px)
 
     def measure(self, text: str, size_px: int, math: bool = False) -> float:
-        return sum(
-            _measure_text(_load_font(font_path, size_px), char)
-            for font_path, char in self._font_runs(text, size_px, math=math)
-        )
+        """Return the nominal extent used by all character layout backends.
+
+        Spacing advances the origin of the next character, so there is no
+        trailing spacing after the final glyph. Measuring individual glyphs
+        also avoids font kerning that our character renderers do not apply.
+        """
+        x = 0.0
+        extent = 0.0
+        for char in text:
+            extent = max(extent, x + self.character_advance(char, size_px, math=math, include_spacing=False))
+            x += self.character_advance(char, size_px, math=math)
+        return extent
+
+    def character_advance(
+        self, char: str, size_px: int, math: bool = False, include_spacing: bool = True
+    ) -> float:
+        """Measure one glyph's advance, with the same space rule as rendering."""
+        font_path = self._font_path_for_char(char, size_px, math=math)
+        width = max(1.0, _character_width(font_path, size_px, char))
+        if char.isspace():
+            return max(size_px * 0.35, width)
+        return max(1.0, width + (self.config.word_spacing_px if include_spacing else 0.0))
+
+    def _sample_character_advance(self, char: str, size_px: int, rand: random.Random, math: bool = False) -> float:
+        advance = self.character_advance(char, size_px, math=math)
+        if not char.isspace():
+            advance += self._sample_position_offset(rand, self._advance_jitter_sigma(size_px))
+        return max(1.0, advance)
+
+    def _line_canvas_width(self, text: str, size_px: int, pad: int, math_mode: bool = False) -> int:
+        # A line may exceed the caller's width (an indivisible glyph, spacing,
+        # or random advance); the caller must see all ink to lay it out safely.
+        advance_pad = 3 * self._advance_jitter_sigma(size_px) * max(0, len(text) - 1)
+        return max(16, math.ceil(self.measure(text, size_px, math=math_mode) + advance_pad + 3 * pad))
 
     def render_line(
         self,
@@ -319,7 +349,7 @@ class HandwritingEngine:
         return max(0.0, configured) if configured is not None else max(0.2, size_px * 0.015)
 
     def _advance_jitter_sigma(self, size_px: int) -> float:
-        return max(0.1, size_px * 0.01)
+        return max(0.0, size_px * self.config.advance_jitter_sigma_ratio)
 
     def _vertical_position_sigma(self, size_px: int, math_mode: bool = False) -> float:
         if math_mode:
@@ -382,7 +412,7 @@ class HandwritingEngine:
         descent = max(_load_font(font_path, size_px).getmetrics()[1] for font_path, _ in runs)
         max_adjustment = max(self._glyph_vertical_adjustment(char, size_px) for char in text)
         line_height = max(round(size_px * self.config.line_spacing), reference_ascent + descent + 2 * pad + max_adjustment)
-        width = max(16, min(max_width + 2 * pad, round(self.measure(text, size_px, math=math) + 2 * pad)))
+        width = self._line_canvas_width(text, size_px, pad, math_mode=math)
         image = Image.new("RGBA", (width, line_height), (0, 0, 0, 0))
         x = float(pad)
         baseline = pad + reference_ascent
@@ -391,13 +421,12 @@ class HandwritingEngine:
         for index, char in enumerate(text):
             font_path = self._font_path_for_char(char, size_px, math=math)
             font = _load_font(font_path, size_px)
-            advance = max(1.0, _measure_text(font, char))
             if char.isspace():
-                x += max(size_px * 0.35, advance)
+                x += self.character_advance(char, size_px, math=math)
                 continue
             bbox = font.getbbox(char)
             if bbox is None:
-                x += advance
+                x += self._sample_character_advance(char, size_px, rand, math=math)
                 continue
             glyph_width = max(1, bbox[2] - bbox[0])
             glyph_height = max(1, bbox[3] - bbox[1])
@@ -427,16 +456,13 @@ class HandwritingEngine:
                 + self._sample_position_offset(rand, y_sigma)
             )
             image.alpha_composite(glyph, (glyph_x, glyph_y))
-            x += (
-                advance
-                + self.config.word_spacing_px
-                + self._sample_position_offset(rand, self._advance_jitter_sigma(size_px))
-            )
+            x += self._sample_character_advance(char, size_px, rand, math=math)
         cropped, _, crop_top = _crop_alpha_with_offset(image, pad=4)
         rendered_baseline = round(baseline - crop_top)
         return (cropped, rendered_baseline) if return_baseline else cropped
 
     def _render_with_handright(self, text: str, size_px: int, max_width: int, seed: int, math: bool = False) -> Image.Image:
+        rand = random.Random(seed)
         x_sigma = self._glyph_position_sigma(size_px, self.config.perturb_x_sigma_px)
         y_sigma = self._vertical_position_sigma(size_px, math_mode=math)
         jitter_pad = self._position_jitter_padding(x_sigma, y_sigma)
@@ -450,12 +476,19 @@ class HandwritingEngine:
         )
         run_height = max(size_px + 2 * pad_y, round(size_px * self.config.line_spacing))
         line_height = run_height + 2 * pad_y + max_shift
-        width = max(16, min(max_width + 2 * pad_x, round(self.measure(text, size_px, math=math) + 3 * pad_x)))
+        width = self._line_canvas_width(text, size_px, pad_x, math_mode=math)
         background = Image.new("RGBA", (width, line_height), (0, 0, 0, 0))
-        x = pad_x
-        for index, (font_path, run) in enumerate(runs):
+        x = float(pad_x)
+        # Handright advances by glyph bounding boxes, rather than font advances,
+        # and uses a different space width. Let it draw glyphs while sharing the
+        # same positioning as SDT/Pillow, including across fallback font runs.
+        for index, char in enumerate(text):
+            if char.isspace():
+                x += self.character_advance(char, size_px, math=math)
+                continue
+            font_path = self._font_path_for_char(char, size_px, math=math)
             run_image = self._render_handright_run(
-                run,
+                char,
                 size_px,
                 max_width,
                 _stable_seed(seed, index),
@@ -465,10 +498,10 @@ class HandwritingEngine:
             y = (
                 pad_y
                 + self._baseline_shift(font_path, size_px, reference_ascent)
-                + self._run_vertical_adjustment(run, size_px)
+                + self._glyph_vertical_adjustment(char, size_px)
             )
-            background.alpha_composite(run_image, (round(x), y))
-            x += _measure_text(_load_font(font_path, size_px), run)
+            background.alpha_composite(run_image, (round(x - pad_x), y))
+            x += self._sample_character_advance(char, size_px, rand, math=math)
         return _crop_alpha(background, pad=4)
 
     def _render_handright_run(
@@ -486,19 +519,23 @@ class HandwritingEngine:
         jitter_pad = self._position_jitter_padding(x_sigma, y_sigma)
         pad_x = max(jitter_pad, round(size_px * 0.35))
         pad_y = max(jitter_pad, round(size_px * 0.35))
-        line_height = max(size_px + 2 * pad_y, round(size_px * self.config.line_spacing))
-        width = max(16, min(max_width + 2 * pad_x, round(_measure_text(font, text) + 2.8 * pad_x)))
+        ascent, descent = font.getmetrics()
+        line_height = max(ascent + descent + 2 * pad_y, round(size_px * self.config.line_spacing))
+        width = max(size_px + 2 * pad_x, self._line_canvas_width(text, size_px, pad_x, math_mode=math_mode))
         background = Image.new("RGBA", (width, line_height), (0, 0, 0, 0))
         template = Template(
             background=background,
             font=font,
-            line_spacing=line_height,
+            line_spacing=size_px,
             fill=self.ink,
             left_margin=pad_x,
             top_margin=pad_y,
             right_margin=pad_x,
             bottom_margin=0,
-            word_spacing=self.config.word_spacing_px,
+            word_spacing=0,
+            word_spacing_sigma=0,
+            font_size_sigma=0,
+            line_spacing_sigma=0,
             perturb_x_sigma=x_sigma,
             perturb_y_sigma=y_sigma,
             perturb_theta_sigma=self.config.perturb_theta_sigma,
@@ -519,22 +556,25 @@ class HandwritingEngine:
         descent = max(_load_font(font_path, size_px).getmetrics()[1] for font_path, _ in runs)
         max_adjustment = max(self._glyph_vertical_adjustment(char, size_px) for char in text)
         line_height = max(round(size_px * self.config.line_spacing), reference_ascent + descent + 2 * pad + max_adjustment)
-        width = max(16, min(max_width + 2 * pad, round(self.measure(text, size_px, math=math) + 2 * pad)))
+        width = self._line_canvas_width(text, size_px, pad, math_mode=math)
         image = Image.new("RGBA", (width, line_height), (0, 0, 0, 0))
         x = pad
         baseline = pad + reference_ascent
         for char in text:
             font_path = self._font_path_for_char(char, size_px, math=math)
             font = _load_font(font_path, size_px)
-            if char == " ":
-                x += max(size_px * 0.35, _measure_text(font, " "))
+            if char.isspace():
+                x += self.character_advance(char, size_px, math=math)
                 continue
             bbox = font.getbbox(char)
-            char_w = max(1, round(_measure_text(font, char)))
+            if bbox is None:
+                x += self._sample_character_advance(char, size_px, rand, math=math)
+                continue
+            char_w = max(1, bbox[2] - bbox[0])
             glyph = Image.new("RGBA", (char_w + 2 * pad, line_height), (0, 0, 0, 0))
             glyph_draw = ImageDraw.Draw(glyph)
             glyph_y = baseline - font.getmetrics()[0] + self._glyph_vertical_adjustment(char, size_px)
-            glyph_draw.text((pad - bbox[0], glyph_y), char, fill=self.ink, font=font)
+            glyph_draw.text((pad, glyph_y), char, fill=self.ink, font=font)
             angle = rand.gauss(0, self._glyph_rotation_sigma_degrees())
             glyph = glyph.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
             image.alpha_composite(
@@ -544,11 +584,7 @@ class HandwritingEngine:
                     round(self._sample_position_offset(rand, y_sigma)),
                 ),
             )
-            x += (
-                char_w
-                + self.config.word_spacing_px
-                + self._sample_position_offset(rand, self._advance_jitter_sigma(size_px))
-            )
+            x += self._sample_character_advance(char, size_px, rand, math=math)
         return _crop_alpha(image, pad=4)
 
     def _font_runs(self, text: str, size_px: int, math: bool = False) -> list[tuple[str, str]]:
@@ -588,25 +624,58 @@ class HandwritingEngine:
         return self._glyph_vertical_adjustment(run[0], size_px) if run else 0
 
 
-def wrap_text(engine: HandwritingEngine, text: str, size_px: int, max_width: int, math: bool = False) -> list[str]:
+def wrap_text(
+    engine: HandwritingEngine,
+    text: str,
+    size_px: int,
+    max_width: int,
+    math: bool = False,
+    first_line_width: int | None = None,
+) -> list[str]:
+    """Wrap without discarding characters or letting a long word overflow.
+
+    Prefer whole words. If a word cannot fit on an empty line, split it by
+    character. Closing punctuation travels with its preceding character;
+    only an indivisible character/punctuation cluster may exceed the width.
+    """
     lines: list[str] = []
     for raw_line in text.splitlines() or [""]:
-        units = _wrap_units(raw_line)
-        current = ""
-        for unit in units:
-            candidate = (current + unit).strip() if not current else current + unit
-            if current and engine.measure(candidate, size_px, math=math) > max_width:
-                if starts_with_forbidden_line_punctuation(unit):
-                    current = candidate
-                else:
-                    lines.append(current.strip())
-                    current = unit.strip()
-            else:
-                current = candidate
-        if current.strip():
-            lines.append(current.strip())
-        elif not units:
+        remaining = "".join(_wrap_units(raw_line)).strip()
+        if not remaining:
             lines.append("")
+            continue
+        while remaining:
+            width = max(1, first_line_width if not lines and first_line_width is not None else max_width)
+            fit = 0
+            for end in range(1, len(remaining) + 1):
+                if engine.measure(remaining[:end], size_px, math=math) > width:
+                    break
+                fit = end
+            if fit == len(remaining):
+                lines.append(remaining)
+                break
+
+            # Find the latest completed word or character unit that fits.
+            boundary = 0
+            cursor = 0
+            for unit in _wrap_units(remaining):
+                cursor += len(unit)
+                if cursor > fit:
+                    break
+                boundary = cursor
+            split = boundary or fit or 1
+            # Move a preceding character to the next line instead of pushing
+            # punctuation outside the right margin of the previous line.
+            while split > 0 and starts_with_forbidden_line_punctuation(remaining[split:]):
+                split -= 1
+            if split == 0:
+                # No legal break fits, e.g. a one-character-wide column with
+                # a closing quote. Keep the smallest unbreakable cluster.
+                split = 1
+                while split < len(remaining) and starts_with_forbidden_line_punctuation(remaining[split:]):
+                    split += 1
+            lines.append(remaining[:split].rstrip())
+            remaining = remaining[split:].lstrip()
     return lines
 
 
@@ -721,6 +790,12 @@ def _measure_text(font: ImageFont.FreeTypeFont, text: str) -> float:
     scratch = Image.new("L", (1, 1), 0)
     draw = ImageDraw.Draw(scratch)
     return draw.textlength(text, font=font)
+
+
+@lru_cache(maxsize=8192)
+def _character_width(font_path: str, size_px: int, char: str) -> float:
+    """Reuse glyph metrics while line breaking measures growing prefixes."""
+    return _measure_text(_load_font(font_path, size_px), char)
 
 
 def _compact_weight_sample(text: str, fallback: str) -> str:

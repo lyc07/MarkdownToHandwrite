@@ -277,7 +277,7 @@ class FormulaRendererTests(unittest.TestCase):
         self.assertGreater(cases.height, 36)
 
     def test_extended_example_math_is_supported(self):
-        source = Path("examples/test.md").read_text(encoding="utf-8")
+        source = (Path(__file__).parent / "fixtures" / "math_regression.md").read_text(encoding="utf-8")
         blocks = parse_markdown(source)
         formulas: list[str] = []
         for block in blocks:
